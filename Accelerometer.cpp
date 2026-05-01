@@ -19,7 +19,7 @@
 #define REG_MOT_DETECT_CTRL 0x69
 #define REG_INT_STATUS      0x3A
 
-// Tap tuning for ball + resin + enclosure
+
 #define IMPACT_THRESHOLD_G  2.5f
 #define TAP_CEILING_G       5.5f
 #define SPIKE_DELTA_G       0.18f
@@ -28,7 +28,7 @@
 static float prevMagnitudeG = 0.0f;
 static float lastMagnitudeG = 0.0f;
 
-// ----------------------------------------------------------------
+
 static void i2c_write(uint8_t reg, uint8_t data) {
   Wire.beginTransmission(MPU_ADDR);
   Wire.write(reg);
@@ -50,31 +50,31 @@ static bool i2c_read(uint8_t reg, uint8_t *buffer, uint8_t len) {
   return true;
 }
 
-// ----------------------------------------------------------------
+
 bool accel_init(void) {
   uint8_t who = 0;
   if (!i2c_read(REG_WHO_AM_I, &who, 1)) return false;
   if (who != 0x68) return false;
 
-  // Wake up
+
   i2c_write(REG_PWR_MGMT_1, 0x00);
   delay(100);
 
-  // Set accel full-scale range to ±8g
+  
   i2c_write(REG_ACCEL_CONFIG, 0x10);
   delay(10);
 
-  // INT pin — active high, push-pull, cleared on int status read
+  
   i2c_write(REG_INT_PIN_CFG, 0x00);
 
-  // Clear any pending interrupts from startup
+  
   uint8_t dummy;
   i2c_read(REG_INT_STATUS, &dummy, 1);
 
   return true;
 }
 
-// ----------------------------------------------------------------
+
 void accel_read_raw(AccelData_t *data) {
   uint8_t buf[6];
   if (!i2c_read(REG_ACCEL_XOUT_H, buf, 6)) {
@@ -86,12 +86,12 @@ void accel_read_raw(AccelData_t *data) {
   data->z = (int16_t)((buf[4] << 8) | buf[5]);
 }
 
-// ----------------------------------------------------------------
+
 float accel_get_magnitude_g(void) {
   AccelData_t raw;
   accel_read_raw(&raw);
 
-  const float sensitivity = 4096.0f;  // ±8g range
+  const float sensitivity = 4096.0f;  
   float x = raw.x / sensitivity;
   float y = raw.y / sensitivity;
   float z = raw.z / sensitivity;
@@ -101,7 +101,7 @@ float accel_get_magnitude_g(void) {
   return lastMagnitudeG;
 }
 
-// ----------------------------------------------------------------
+
 bool accel_check_impact(void) {
   static uint32_t lastImpactTime = 0;
   uint32_t now = millis();
@@ -120,7 +120,7 @@ bool accel_check_impact(void) {
   return false;
 }
 
-// ----------------------------------------------------------------
+
 void accel_enable_motion_wake(void) {
   uint8_t dummy;
   i2c_read(REG_INT_STATUS, &dummy, 1);
@@ -138,7 +138,7 @@ void accel_enable_motion_wake(void) {
   delay(150);
 }
 
-// ----------------------------------------------------------------
+
 void accel_disable_motion_wake(void) {
   i2c_write(REG_PWR_MGMT_1, 0x00);
   delay(100);
