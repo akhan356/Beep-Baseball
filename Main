@@ -1,0 +1,323 @@
+// ============================================================
+// main.ino
+// ============================================================
+#include <Wire.h>
+#include <avr/sleep.h>
+#include <avr/power.h>
+#include "Accelerometer.h"
+
+
+
+const int buz1 = 5;
+const int buz2 = 6;
+
+bool isActive = false;
+
+
+int tapCount = 0;
+unsigned long firstTapTime    = 0;
+const unsigned long TAP_WINDOW_MS     = 3500;
+const unsigned long TOGGLE_LOCKOUT_MS = 1200;
+unsigned long lastToggleTime  = 0;
+
+
+unsigned long lastToggleMicros = 0;
+unsigned long lastBurstMillis  = 0;
+bool buzState = false;
+
+const unsigned int  BUZ_FREQ     = 2000;
+const unsigned long BURST_ON_MS  = 180;
+const unsigned long BURST_OFF_MS = 120;
+
+
+bool     chirpActive   = false;
+uint8_t  chirpCount    = 0;
+uint8_t  chirpTarget   = 0;
+unsigned long chirpStartMs = 0;
+const unsigned long CHIRP_ON_MS  = 60;
+const unsigned long CHIRP_OFF_MS = 80;
+
+
+const unsigned long SLEEP_TIMEOUT_MS = 30000;
+unsigned long lastActivityTime = 0;
+volatile bool wakeFromISR = false;
+
+const int MPU_INT_PIN = 2;
+
+
+const float STILL_MIN_G = 0.85f;
+const float STILL_MAX_G = 1.15f;
+const unsigned long OFF_ARM_DELAY_MS = 10000;
+
+bool offArmed = false;
+unsigned long stillStartTime = 0;
+float currentMagnitudeG = 0.0f;
+
+
+void setBuzzers(bool on) {
+  digitalWrite(buz1, on ? HIGH : LOW);
+  digitalWrite(buz2, on ? HIGH : LOW);
+}
+
+
+void wakeISR() {
+  wakeFromISR = true;
+}
+
+
+void goToSleep() {
+  Serial.println("Going to sleep...");
+  Serial.flush();
+
+  setBuzzers(false);
+  accel_enable_motion_wake();
+
+  attachInterrupt(digitalPinToInterrupt(MPU_INT_PIN), wakeISR, RISING);
+
+  power_adc_disable();
+  power_spi_disable();
+  power_timer1_disable();
+  power_timer2_disable();
+
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+  sleep_enable();
+  sleep_cpu();
+
+  
+  sleep_disable();
+
+  power_adc_enable();
+  power_spi_enable();
+  power_timer1_enable();
+  power_timer2_enable();
+
+  detachInterrupt(digitalPinToInterrupt(MPU_INT_PIN));
+
+  Wire.end();
+  delay(50);
+  Wire.begin();
+  delay(100);
+
+  accel_disable_motion_wake();
+
+  lastActivityTime = millis();
+  wakeFromISR      = false;
+
+  Serial.println("Woke up from sleep.");
+}
+
+
+void startChirp(uint8_t count) {
+  chirpTarget  = count;
+  chirpCount   = 0;
+  chirpActive  = true;
+  chirpStartMs = millis();
+  setBuzzers(true);
+}
+
+void updateChirp() {
+  if (!chirpActive) return;
+
+  unsigned long now         = millis();
+  unsigned long cycleMs     = CHIRP_ON_MS + CHIRP_OFF_MS;
+  unsigned long elapsed     = now - chirpStartMs;
+  uint8_t       cycleIndex  = elapsed / cycleMs;
+  unsigned long timeInCycle = elapsed % cycleMs;
+
+  if (cycleIndex >= chirpTarget) {
+    chirpActive = false;
+    setBuzzers(false);
+    return;
+  }
+
+  setBuzzers(timeInCycle < CHIRP_ON_MS);
+}
+
+
+void updateBuzzers() {
+  if (chirpActive) {
+    updateChirp();
+    return;
+  }
+
+  if (!isActive) {
+    setBuzzers(false);
+    return;
+  }
+
+  if (offArmed) {
+    buzState = false;
+    setBuzzers(false);
+    return;
+  }
+
+  unsigned long nowMillis   = millis();
+  unsigned long nowMicros   = micros();
+  unsigned long cycleMs     = BURST_ON_MS + BURST_OFF_MS;
+  unsigned long timeInCycle = (nowMillis - lastBurstMillis) % cycleMs;
+
+  if (timeInCycle < BURST_ON_MS) {
+    unsigned long halfPeriodUs = 1000000UL / (2UL * BUZ_FREQ);
+    if (nowMicros - lastToggleMicros >= halfPeriodUs) {
+      lastToggleMicros = nowMicros;
+      buzState = !buzState;
+      setBuzzers(buzState);
+    }
+  } else {
+    buzState = false;
+    setBuzzers(false);
+  }
+}
+
+// ----------------------------------------------------------------
+void updateOffArmState() {
+  unsigned long now = millis();
+
+  if (!isActive) {
+    stillStartTime = 0;
+    return;
+  }
+
+  
+  unsigned long cycleMs     = BURST_ON_MS + BURST_OFF_MS;
+  unsigned long timeInCycle = (now - lastBurstMillis) % cycleMs;
+
+  if (timeInCycle < BURST_ON_MS) {
+    return;
+  }
+
+  
+  if (fabs(currentMagnitudeG - 1.0f) < 0.3f) {
+    if (stillStartTime == 0) {
+      stillStartTime = now;
+    }
+
+    
+    if (now - stillStartTime >= OFF_ARM_DELAY_MS) {
+      Serial.println("AUTO OFF (30s still)");
+
+      isActive = false;
+      setBuzzers(false);
+      buzState = false;
+
+      tapCount = 0;
+      firstTapTime = 0;
+      stillStartTime = 0;
+    }
+
+  } else {
+    stillStartTime = 0;
+  }
+}
+
+
+void handleTapToggle() {
+  unsigned long now = millis();
+
+  if (now - lastToggleTime < TOGGLE_LOCKOUT_MS) return;
+  if (chirpActive) return;
+
+  if (accel_check_impact()) {
+    lastActivityTime = now;
+
+    
+    if (isActive) return;
+
+    
+
+    if (tapCount == 0) {
+      tapCount     = 1;
+      firstTapTime = now;
+    } else {
+      if (now - firstTapTime <= TAP_WINDOW_MS) {
+        tapCount++;
+      } else {
+        tapCount     = 1;
+        firstTapTime = now;
+      }
+    }
+
+    Serial.print("Tap detected. Count = ");
+    Serial.println(tapCount);
+
+    if (tapCount >= 5) {
+      isActive       = !isActive;
+      tapCount       = 0;
+      firstTapTime   = 0;
+      lastToggleTime = now;
+
+      if (isActive) {
+        Serial.println("5 taps -> SYSTEM ON");
+        lastBurstMillis  = millis();
+        lastToggleMicros = micros();
+        buzState         = false;
+
+        offArmed = false;
+        stillStartTime = 0;
+      } else {
+        Serial.println("5 taps -> SYSTEM OFF");
+        setBuzzers(false);
+        buzState = false;
+
+        offArmed = false;
+        stillStartTime = 0;
+      }
+    } else {
+      if (!isActive) {
+        startChirp(tapCount);
+      }
+    }
+  }
+
+  if (tapCount > 0 && (now - firstTapTime > TAP_WINDOW_MS)) {
+    Serial.println("Tap window expired. Resetting count.");
+    tapCount = 0;
+  }
+}
+
+
+void setup() {
+  pinMode(buz1, OUTPUT);
+  pinMode(buz2, OUTPUT);
+  pinMode(MPU_INT_PIN, INPUT_PULLUP);
+  setBuzzers(false);
+
+  Serial.begin(115200);
+  Wire.begin();
+  delay(1000);
+
+  Serial.println("Starting Beep Baseball System...");
+
+  if (accel_init()) {
+    Serial.println("Ready. 5 taps within 3.5s toggles ON/OFF.");
+    Serial.println("While ON, OFF is only allowed after 30s stationary.");
+    Serial.println("System sleeps after 30s of inactivity while OFF.");
+  } else {
+    Serial.println("ERROR: Accelerometer not found. Check wiring.");
+    while (1);
+  }
+
+  lastActivityTime = millis();
+}
+
+
+void loop() {
+  currentMagnitudeG = accel_get_magnitude_g();
+
+  Serial.print(currentMagnitudeG);
+  Serial.print(",");
+  Serial.print(3.5);
+  Serial.print(",");
+  Serial.println(isActive ? 4.0 : 0.0);
+  Serial.println(currentMagnitudeG);
+
+  updateOffArmState();
+  handleTapToggle();
+  updateBuzzers();
+
+  if (!isActive && !chirpActive) {
+    if (millis() - lastActivityTime > SLEEP_TIMEOUT_MS) {
+      goToSleep();
+    }
+  }
+}
